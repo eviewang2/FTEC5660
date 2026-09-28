@@ -50,4 +50,39 @@ homework runner.
 
 ## Homework 1 solution: 
 > to students: please fill your solution description here.
+### Chain design
 
+```mermaid
+flowchart TD
+    A[Receipt images] --> B[ChatPromptTemplate<br/>system rules + receipt image]
+    B -->|chain.batch, all receipts in parallel| C[deepseek-v4-flash-vision-exp]
+    C --> D[JsonOutputParser<br/>items, discounts, subtotal, rounding, payment_amount]
+    D --> E{Self-check in Python<br/>sum items - sum discounts = subtotal?}
+    E -->|No: re-read with feedback, up to 2 times| C
+    E -->|Yes| F[Sum with Decimal]
+    F --> G[Q1: sum of payment_amount<br/>Q2: sum of subtotal + discounts]
+```
+
+
+### Description
+
+My chain has three parts: a prompt template, the DeepSeek model and a JSON parser
+(`ChatPromptTemplate | ChatDeepSeek | JsonOutputParser`).
+
+For each receipt, I send the image to the model. The prompt asks the model to read
+the receipt and return JSON with five things: all item prices, all discounts, the
+subtotal, the rounding and the final payment. I use `chain.batch` so that all receipts
+are read at the same time.
+
+The model only reads the numbers. Python does all the maths with `Decimal`, so there
+are no rounding errors.
+
+When I tested my code, I found a problem. Sometimes the model read a number wrongly,
+for example 6.00 as 5.00, because the photo was not clear. So I added a self-check.
+For each receipt, Python checks if "items minus discounts equals subtotal". If not,
+the model reads the receipt again, up to two more times.
+
+- Question 1 = the sum of the final payments.
+- Question 2 = the sum of (subtotal + discounts) for each receipt.
+
+After adding the self-check, my code gave the correct answers in all three test runs.
