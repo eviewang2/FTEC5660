@@ -63,8 +63,41 @@ def build_chain() -> Any:
     ``deepseek-v4-flash-vision-exp``. The API key is loaded from .env.
     """
     ### YOUR CODE HERE
-    return None
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_deepseek import ChatDeepSeek
+    from langchain_core.output_parsers import JsonOutputParser
 
+    system_text = """You read Hong Kong supermarket receipts. Output ONLY JSON in this format:
+{{
+  "items": [{{"name": "<text>", "amount": <number>}}],
+  "discounts": [{{"label": "<text>", "amount": <number>}}],
+  "subtotal": <number>,
+  "rounding": <number>,
+  "payment_amount": <number>
+}}
+Rules:
+- items: EVERY positive product line above the subtotal (including $0.00 lines and
+  plastic bag charges). Use the line total on the right (already multiplied by QTY/數量).
+- discounts: EVERY negative line above the subtotal (Buy N Save, % OFF, coupons,
+  member offers, 包裝變形 ...). Write amount as a POSITIVE number. Empty list if none.
+- subtotal: the number on the SUBTOTAL / 小計 line.
+- rounding: the ROUNDING line with its sign (e.g. -0.01). 0 if there is none.
+- payment_amount: the final amount paid after rounding (OCTOPUS / 八達通 / VISA / CASH line).
+  If cash was given with change, use subtotal + rounding.
+- Ignore card numbers, remaining balance (餘額), 扣除金額, change (找續), dates and item codes.
+- Check: sum(items) - sum(discounts) must equal subtotal."""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_text),
+        ("human", [
+            {"type": "text", "text": "Read this receipt and output the JSON.{feedback}"},
+            {"type": "image_url", "image_url": {"url": "{image_url}"}},
+        ]),
+    ])
+    llm = ChatDeepSeek(model="deepseek-v4-flash-vision-exp", temperature=0)
+    parser = JsonOutputParser()
+    chain = prompt | llm | parser
+    return chain
 
 def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
     """Run your chain and return one response for each exact query string.
@@ -78,10 +111,53 @@ def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
     multimodal human messages. LangChain's ``batch`` method is one simple way
     to process independent receipt-extraction prompts in parallel.
     """
-    ### YOUR CODE HERE
-    _ = (chain, images)
-    return {QUERY_1: DUMMY_RESPONSE, QUERY_2: DUMMY_RESPONSE}
+     ### YOUR CODE HERE
+    def is_consistent(data):
+        """自我检查：商品之和 - 折扣之和 应该等于 小计。"""
+        try:
+            items_sum = sum(Decimal(str(x["amount"])) for x in data["items"])
+            discount_sum = sum(Decimal(str(d["amount"])) for d in data["discounts"])
+            subtotal = Decimal(str(data["subtotal"]))
+            return abs(items_sum - discount_sum - subtotal) < Decimal("0.01")
+        except Exception:
+            return False
 
+    urls = [image_data_url(p) for p in images]
+
+    # 第一轮：所有小票一起读
+    results = chain.batch(
+        [{"image_url": u, "feedback": ""} for u in urls],
+        return_exceptions=True,
+    )
+
+    # 反思：检查没通过的小票，带着提示重读，最多重读 2 轮
+    feedback = (
+        "\nYour previous answer failed the check: sum(items) - sum(discounts) "
+        "did not equal subtotal. Re-read every line and every digit carefully."
+    )
+    for _ in range(2):
+        bad = [i for i, d in enumerate(results) if not is_consistent(d)]
+        if not bad:
+            break
+        retry = chain.batch(
+            [{"image_url": urls[i], "feedback": feedback} for i in bad],
+            return_exceptions=True,
+        )
+        for i, d in zip(bad, retry):
+            results[i] = d
+
+    total_paid = Decimal("0")
+    total_original = Decimal("0")
+    for data in results:
+        if not isinstance(data, dict):
+            continue
+        paid = Decimal(str(data["payment_amount"]))
+        subtotal = Decimal(str(data["subtotal"]))
+        discount_sum = sum(Decimal(str(d["amount"])) for d in data["discounts"])
+        total_paid += paid
+        total_original += subtotal + discount_sum
+
+    return {QUERY_1: f"HK${total_paid:.2f}", QUERY_2: f"HK${total_original:.2f}"}
 
 # Everything below is provided runner/scoring code. No edits are needed.
 
